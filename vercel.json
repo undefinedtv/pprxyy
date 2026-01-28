@@ -1,4 +1,5 @@
 {
+  "regions": ["fra1"],
   "functions": {
     "api/proxy.js": {
       "memory": 128,
