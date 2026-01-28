@@ -1,57 +1,51 @@
-export const config = {
-  runtime: 'edge',
-};
+// export const config = { runtime: 'edge' }; // <--- BU SATIRI SİLİYORUZ
 
-export default async function handler(request) {
-  const { searchParams } = new URL(request.url);
-  const targetUrl = searchParams.get('url');
-  
-  if (!targetUrl) {
-    return new Response('Kullanım: ?url=https://site.com/video.m3u8', { status: 400 });
+export default async function handler(req, res) {
+  const { url } = req.query; // Node.js yapısında query böyle alınır
+
+  if (!url) {
+    return res.status(400).send('Kullanım: ?url=https://site.com/video.m3u8');
   }
 
   try {
-    const decodedUrl = decodeURIComponent(targetUrl);
+    const targetUrl = decodeURIComponent(url);
     
-    // Headerları daha sade ve gerçekçi tutuyoruz
-    // Chrome 144 yerine güncel ve standart bir sürüm kullanıyoruz
-    const myHeaders = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      'Referer': 'https://trgoals1517.xyz/',
-      'Origin': 'https://trgoals1517.xyz',
-      'Accept': '*/*',
-      'Accept-Language': 'en-US,en;q=0.9',
-      // Sec-CH-UA headerlarını kaldırdık, çünkü Vercel'in TLS parmak iziyle uyuşmazsa yakalanırsın.
-    };
-
-    const response = await fetch(decodedUrl, {
+    // Node.js ortamında fetch kullanıyoruz
+    const response = await fetch(targetUrl, {
       method: 'GET',
-      headers: myHeaders,
-      redirect: 'follow' // Yönlendirmeleri takip et
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': 'https://trgoals1517.xyz/',
+        'Origin': 'https://trgoals1517.xyz',
+        'Accept': '*/*',
+      },
+      redirect: 'follow'
     });
 
-    // Eğer hedef site hala engelliyorsa (403 veya Cloudflare HTML sayfası dönüyorsa)
-    if (response.status === 403 || response.status === 503) {
-       // Cloudflare HTML içeriğini görmek yerine hata döndür
-       return new Response("Hedef site Vercel IP'lerini engelliyor (Cloudflare WAF).", { status: 403 });
+    if (!response.ok) {
+       // Cloudflare veya 403 hatası detayını görmek için:
+       const errorText = await response.text();
+       console.log("Hata Detayı:", errorText); // Vercel loglarında görünür
+       if(response.status === 403) return res.status(403).send("Hala engelleniyor (IP Ban).");
     }
 
-    // Response'u yeniden oluştur
-    const newResponse = new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Cache-Control': 'no-cache',
-        // Orijinal içerik tipini koru veya manuel ayarla
-        'Content-Type': response.headers.get('Content-Type') || 'application/vnd.apple.mpegurl'
-      }
-    });
-
-    return newResponse;
+    // Headerları ayarla
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     
+    // İçerik tipini kopyala
+    const contentType = response.headers.get('content-type');
+    if (contentType) {
+      res.setHeader('Content-Type', contentType);
+    }
+
+    // Yayını stream olarak aktar (Node.js Stream)
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    res.status(200).send(buffer);
+
   } catch (error) {
-    return new Response(`Proxy Hatası: ${error.message}`, { status: 500 });
+    res.status(500).send(`Hata: ${error.message}`);
   }
 }
