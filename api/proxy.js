@@ -7,60 +7,51 @@ export default async function handler(request) {
   const targetUrl = searchParams.get('url');
   
   if (!targetUrl) {
-    return new Response('Usage: ?url=https://example.com/stream.m3u8', { 
-      status: 400,
-      headers: { 'Content-Type': 'text/plain' }
-    });
+    return new Response('Kullanım: ?url=https://site.com/video.m3u8', { status: 400 });
   }
-  
+
   try {
     const decodedUrl = decodeURIComponent(targetUrl);
     
+    // Headerları daha sade ve gerçekçi tutuyoruz
+    // Chrome 144 yerine güncel ve standart bir sürüm kullanıyoruz
+    const myHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Referer': 'https://trgoals1517.xyz/',
+      'Origin': 'https://trgoals1517.xyz',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      // Sec-CH-UA headerlarını kaldırdık, çünkü Vercel'in TLS parmak iziyle uyuşmazsa yakalanırsın.
+    };
+
     const response = await fetch(decodedUrl, {
-      headers: {
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9,tr;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Origin': 'https://trgoals1517.xyz',
-        'Referer': 'https://trgoals1517.xyz/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-        'Sec-CH-UA': '"Not(A:Brand";v="8", "Chromium";v="144"',
-        'Sec-CH-UA-Mobile': '?0',
-        'Sec-CH-UA-Platform': '"Windows"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'cross-site'
-      }
+      method: 'GET',
+      headers: myHeaders,
+      redirect: 'follow' // Yönlendirmeleri takip et
     });
-    
-    // Response'u klonla ve header'ları ayarla
+
+    // Eğer hedef site hala engelliyorsa (403 veya Cloudflare HTML sayfası dönüyorsa)
+    if (response.status === 403 || response.status === 503) {
+       // Cloudflare HTML içeriğini görmek yerine hata döndür
+       return new Response("Hedef site Vercel IP'lerini engelliyor (Cloudflare WAF).", { status: 403 });
+    }
+
+    // Response'u yeniden oluştur
     const newResponse = new Response(response.body, {
       status: response.status,
-      statusText: response.statusText
+      statusText: response.statusText,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Cache-Control': 'no-cache',
+        // Orijinal içerik tipini koru veya manuel ayarla
+        'Content-Type': response.headers.get('Content-Type') || 'application/vnd.apple.mpegurl'
+      }
     });
-    
-    // CORS ve Content-Type ayarla
-    newResponse.headers.set('Access-Control-Allow-Origin', '*');
-    newResponse.headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    newResponse.headers.set('Access-Control-Allow-Headers', '*');
-    
-    if (decodedUrl.includes('.m3u8')) {
-      newResponse.headers.set('Content-Type', 'application/vnd.apple.mpegurl');
-    } else if (decodedUrl.includes('.ts')) {
-      newResponse.headers.set('Content-Type', 'video/MP2T');
-    } else if (decodedUrl.includes('.jpg')) {
-      newResponse.headers.set('Content-Type', 'image/jpeg');
-    }
-    
+
     return newResponse;
     
   } catch (error) {
-    return new Response(`Error: ${error.message}`, { 
-      status: 500,
-      headers: {
-        'Content-Type': 'text/plain',
-        'Access-Control-Allow-Origin': '*'
-      }
-    });
+    return new Response(`Proxy Hatası: ${error.message}`, { status: 500 });
   }
 }
