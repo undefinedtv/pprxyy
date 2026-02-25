@@ -1,51 +1,192 @@
-// export const config = { runtime: 'edge' }; // <--- BU SATIRI SİLİYORUZ
+export const config = {
+  runtime: "edge",
+};
 
-export default async function handler(req, res) {
-  const { url } = req.query; // Node.js yapısında query böyle alınır
+// İzin verilen domainler — gerekirse ekle
+const ALLOWED_DOMAINS = [
+  "kablowebtv.com",
+  "tvheryerde.com",
+  "akamaized.net",
+  "cloudfront.net",
+  "cdntr.live",
+  "cdn.live",
+  "level3.net",
+  "fastly.net",
+];
 
-  if (!url) {
-    return res.status(400).send('Kullanım: ?url=https://site.com/video.m3u8');
+const FORWARD_HEADERS = [
+  "user-agent",
+  "accept",
+  "accept-language",
+  "range",
+  "origin",
+  "referer",
+];
+
+// Domain whitelist kontrolü
+function isAllowed(url: string): boolean {
+  try {
+    const { hostname } = new URL(url);
+    return ALLOWED_DOMAINS.some(
+      (d) => hostname === d || hostname.endsWith("." + d)
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Proxy base URL'ini isteğin kendisinden al
+function getProxyBase(req: Request): string {
+  const u = new URL(req.url);
+  return `${u.protocol}//${u.host}`;
+}
+
+// m3u8 içindeki segment/playlist URL'lerini proxy'den geçirecek şekilde yeniden yaz
+function rewriteM3U8(text: string, sourceUrl: string, proxyBase: string): string {
+  const baseDir = sourceUrl.substring(0, sourceUrl.lastIndexOf("/") + 1);
+
+  return text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+
+      // Boş satır veya yorum → dokunma
+      if (!trimmed || trimmed.startsWith("#")) return line;
+
+      // Göreceli URL → mutlak
+      const absolute = trimmed.startsWith("http")
+        ? trimmed
+        : baseDir + trimmed;
+
+      // Proxy üzerinden yönlendir
+      const encoded = encodeURIComponent(absolute);
+      return `${proxyBase}/proxy?url=${encoded}`;
+    })
+    .join("\n");
+}
+
+export default async function handler(req: Request): Promise<Response> {
+  // CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+      },
+    });
+  }
+
+  const reqUrl = new URL(req.url);
+  const targetEncoded = reqUrl.searchParams.get("url");
+
+  // url parametresi zorunlu
+  if (!targetEncoded) {
+    return new Response(
+      JSON.stringify({ error: "url parametresi eksik" }),
+      {
+        status: 400,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      }
+    );
+  }
+
+  let targetUrl: string;
+  try {
+    targetUrl = decodeURIComponent(targetEncoded);
+    new URL(targetUrl); // Geçerli URL mi kontrol et
+  } catch {
+    return new Response(
+      JSON.stringify({ error: "Geçersiz URL" }),
+      {
+        status: 400,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      }
+    );
+  }
+
+  // Whitelist kontrolü
+  if (!isAllowed(targetUrl)) {
+    const { hostname } = new URL(targetUrl);
+    return new Response(
+      JSON.stringify({ error: `İzinsiz domain: ${hostname}` }),
+      {
+        status: 403,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      }
+    );
+  }
+
+  // Güvenli header'ları ilet
+  const forwardHeaders = new Headers();
+  for (const [key, value] of req.headers.entries()) {
+    if (FORWARD_HEADERS.includes(key.toLowerCase())) {
+      forwardHeaders.set(key, value);
+    }
   }
 
   try {
-    const targetUrl = decodeURIComponent(url);
-    
-    // Node.js ortamında fetch kullanıyoruz
-    const response = await fetch(targetUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Referer': 'https://trgoals1517.xyz/',
-        'Origin': 'https://trgoals1517.xyz',
-        'Accept': '*/*',
-      },
-      redirect: 'follow'
+    const upstream = await fetch(targetUrl, {
+      method: req.method,
+      headers: forwardHeaders,
+      redirect: "follow",
     });
 
-    if (!response.ok) {
-       // Cloudflare veya 403 hatası detayını görmek için:
-       const errorText = await response.text();
-       console.log("Hata Detayı:", errorText); // Vercel loglarında görünür
-       if(response.status === 403) return res.status(403).send("Hala engelleniyor (IP Ban).");
+    const contentType = upstream.headers.get("content-type") ?? "";
+    const isM3U8 =
+      contentType.includes("mpegurl") ||
+      targetUrl.split("?")[0].endsWith(".m3u8");
+
+    // Yanıt header'larını hazırla
+    const responseHeaders = new Headers({
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "*",
+      "Content-Type": contentType || "application/octet-stream",
+      "Cache-Control": upstream.headers.get("cache-control") ?? "no-cache",
+    });
+
+    // Video player için Range desteği
+    const contentRange = upstream.headers.get("content-range");
+    const acceptRanges = upstream.headers.get("accept-ranges");
+    if (contentRange) responseHeaders.set("Content-Range", contentRange);
+    if (acceptRanges) responseHeaders.set("Accept-Ranges", acceptRanges);
+
+    // m3u8 → içeriği rewrite et
+    if (isM3U8 && req.method !== "HEAD") {
+      const text = await upstream.text();
+      const rewritten = rewriteM3U8(text, targetUrl, getProxyBase(req));
+      return new Response(rewritten, {
+        status: upstream.status,
+        headers: responseHeaders,
+      });
     }
 
-    // Headerları ayarla
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    
-    // İçerik tipini kopyala
-    const contentType = response.headers.get('content-type');
-    if (contentType) {
-      res.setHeader('Content-Type', contentType);
-    }
+    // .ts segment veya diğer içerik → direkt stream et
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: responseHeaders,
+    });
 
-    // Yayını stream olarak aktar (Node.js Stream)
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    
-    res.status(200).send(buffer);
-
-  } catch (error) {
-    res.status(500).send(`Hata: ${error.message}`);
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: `Upstream hatası: ${String(err)}` }),
+      {
+        status: 502,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      }
+    );
   }
 }
